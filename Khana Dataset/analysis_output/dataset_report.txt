@@ -1,0 +1,147 @@
+===========================================================================
+KHANA DATASET ANALYSIS REPORT
+===========================================================================
+
+Base Directory: /home/karthiksunil/work/code/cv/CuisineProject/Khana Dataset
+Image Root: /home/karthiksunil/work/code/cv/CuisineProject/Khana Dataset/extracted/khana
+
+--- FILE STRUCTURE ---
+Total classes (folders): 80
+Total images: 131819
+Min class size: 125
+Max class size: 7884
+Median class size: 826
+Mean class size: 1647
+
+--- IMAGE DIMENSIONS ---
+Sampled: 960 images
+Width:  500.0 ± 0.0 (range: 500-500)
+Height: 500.0 ± 0.0 (range: 500-500)
+Mean aspect ratio: 1.000
+Color modes: {"RGB": 958, "P": 2}
+
+--- ALL CLASS COUNTS (sorted by count) ---
+  paneer masala: 7884
+  biryani: 6639
+  masala dosa: 5894
+  idli: 5835
+  garlic naan: 5730
+  grilled sandwich: 5705
+  garlic bread: 5668
+  pav bhaji: 4424
+  seekh kebab: 4326
+  samosa: 4054
+  uttapam: 4007
+  palak paneer: 3385
+  anda curry: 3248
+  aloo paratha: 3155
+  kulfi: 3033
+  chicken pizza: 3014
+  gulab jamun: 2962
+  chana masala: 2873
+  vada pav: 2716
+  chicken wings: 2545
+  paneer pizza: 2491
+  falooda: 2483
+  margherita pizza: 2460
+  chapati: 2238
+  steamed momo: 1790
+  thali: 1632
+  hara bhara kabab: 1621
+  fish curry: 1553
+  poha: 1483
+  dal khichdi: 1252
+  dhokla: 1211
+  chole bhature: 1181
+  rasgulla: 1151
+  masala papad: 1069
+  aloo gobi: 1007
+  chaas: 999
+  papdi chaat: 999
+  jalebi: 962
+  dabeli: 928
+  rava dosa: 868
+  pani puri: 784
+  rajma chawal: 715
+  kaju katli: 705
+  kheer: 670
+  thukpa: 607
+  bhindi masala: 598
+  sev puri: 594
+  set dosa: 588
+  puri bhaji: 562
+  misal pav: 543
+  medu vada: 541
+  pongal: 522
+  besan laddu: 483
+  sabudana vada: 457
+  sabudana khichdi: 391
+  idiyappam: 371
+  navratan korma: 369
+  gajar ka halwa: 357
+  phirni: 353
+  aloo mutter: 350
+  pepperoni pizza: 321
+  mysore pak: 306
+  ghevar: 294
+  onion pakoda: 292
+  chivda: 277
+  gujhia: 269
+  amritsari kulcha: 267
+  paniyaram: 267
+  khakhra: 256
+  solkadhi: 243
+  murukku: 228
+  boondi laddu: 226
+  modak: 226
+  patrode: 218
+  neer dosa: 215
+  moong dal halwa: 204
+  chikki: 201
+  balushahi: 179
+  banana chips: 170
+  aloo methi: 125
+
+--- CONFUSING PAIRS (name-based) ---
+  [share word 'masala'] ['masala dosa', 'paneer masala', 'chana masala', 'bhindi masala', 'masala papad'] -> [5894, 7884, 2873, 598, 1069]
+  [share word 'paneer'] ['palak paneer', 'paneer pizza', 'paneer masala'] -> [3385, 2491, 7884]
+  [share word 'garlic'] ['garlic bread', 'garlic naan'] -> [5668, 5730]
+  [share word 'pizza'] ['pepperoni pizza', 'margherita pizza', 'chicken pizza', 'paneer pizza'] -> [321, 2460, 3014, 2491]
+  [share word 'pav'] ['vada pav', 'misal pav', 'pav bhaji'] -> [2716, 543, 4424]
+  [share word 'dosa'] ['neer dosa', 'masala dosa', 'set dosa', 'rava dosa'] -> [215, 5894, 588, 868]
+  [share word 'chicken'] ['chicken wings', 'chicken pizza'] -> [2545, 3014]
+  [share word 'bhaji'] ['pav bhaji', 'puri bhaji'] -> [4424, 562]
+  [share word 'curry'] ['fish curry', 'anda curry'] -> [1553, 3248]
+  [share word 'aloo'] ['aloo methi', 'aloo gobi', 'aloo paratha', 'aloo mutter'] -> [125, 1007, 3155, 350]
+  [share word 'vada'] ['vada pav', 'medu vada', 'sabudana vada'] -> [2716, 541, 457]
+  [share word 'puri'] ['sev puri', 'puri bhaji', 'pani puri'] -> [594, 562, 784]
+  [share word 'khichdi'] ['dal khichdi', 'sabudana khichdi'] -> [1252, 391]
+  [share word 'dal'] ['moong dal halwa', 'dal khichdi'] -> [204, 1252]
+  [share word 'sabudana'] ['sabudana vada', 'sabudana khichdi'] -> [457, 391]
+  [share word 'laddu'] ['boondi laddu', 'besan laddu'] -> [226, 483]
+  [share word 'halwa'] ['gajar ka halwa', 'moong dal halwa'] -> [357, 204]
+
+--- TAXONOMY GROUPS ---
+  [category=rice] ['biryani', 'dal khichdi', 'pongal', 'rajma chawal'] -> [6639, 1252, 715, 522]
+  [category=south indian] ['idiyappam', 'idli', 'medu vada', 'paniyaram', 'uttapam'] -> [5835, 4007, 541, 371, 267]
+  [category=snacks] ['banana chips', 'chicken wings', 'dabeli', 'dhokla', 'garlic bread', 'grilled sandwich', 'khakhra', 'misal pav', 'onion pakoda', 'pav bhaji', 'poha', 'samosa', 'steamed momo', 'vada pav'] -> [5705, 5668, 4424, 4054, 2716, 2545, 1790, 1483, 1211, 928, 543, 292, 256, 170]
+  [category=kebab] ['hara bhara kabab', 'seekh kebab'] -> [4326, 1621]
+  [category=curry] ['anda curry', 'bhindi masala', 'chana masala', 'fish curry', 'navratan korma'] -> [3248, 2873, 1553, 598, 369]
+  [category=sweet] ['balushahi', 'falooda', 'gujhia', 'gulab jamun', 'jalebi', 'kaju katli', 'kheer', 'kulfi', 'modak', 'mysore pak', 'phirni', 'rasgulla'] -> [3033, 2962, 2483, 1151, 962, 705, 670, 353, 306, 269, 226, 179]
+  [category=pizza] ['chicken pizza', 'margherita pizza', 'paneer pizza', 'pepperoni pizza'] -> [3014, 2491, 2460, 321]
+  [category=others] ['chikki', 'chivda', 'ghevar', 'masala papad', 'murukku', 'patrode', 'thali', 'thukpa'] -> [1632, 1069, 607, 294, 277, 228, 218, 201]
+  [category=beverage] ['chaas', 'solkadhi'] -> [999, 243]
+  [category=chaat] ['pani puri', 'papdi chaat', 'sev puri'] -> [999, 784, 594]
+  [category=fasting] ['sabudana khichdi', 'sabudana vada'] -> [457, 391]
+
+--- TAXONOMY SAMPLE (first 10 rows) ---
+  {"category": "south indian", "dish": "dosa", "variety": "neer dosa", "dietary": "veg"}
+  {"category": "south indian", "dish": "dosa", "variety": "set dosa", "dietary": "veg"}
+  {"category": "south indian", "dish": "dosa", "variety": "rava dosa", "dietary": "veg"}
+  {"category": "south indian", "dish": "dosa", "variety": "masala dosa", "dietary": "veg"}
+  {"category": "south indian", "dish": "idli", "variety": "", "dietary": "veg"}
+  {"category": "south indian", "dish": "medu vada", "variety": "", "dietary": "veg"}
+  {"category": "south indian", "dish": "idiyappam", "variety": "", "dietary": "veg"}
+  {"category": "south indian", "dish": "paniyaram", "variety": "", "dietary": "veg"}
+  {"category": "south indian", "dish": "uttapam", "variety": "", "dietary": "veg"}
+  {"category": "pizza", "dish": "paneer pizza", "variety": "", "dietary": "veg"}
