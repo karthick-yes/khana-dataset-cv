@@ -11,14 +11,28 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Make the repo root importable when this script is run from the dataset folder.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+BASE_DIR = REPO_ROOT
+
 # ============================================================
 # PATHS
 # ============================================================
-BASE_DIR = "/home/karthiksunil/work/code/cv/CuisineProject/Khana Dataset"
-DATA_ROOT = os.path.join(BASE_DIR, "extracted", "khana")
-LABELS_PATH = os.path.join(BASE_DIR, "labels.txt")
-TAXONOMY_PATH = os.path.join(BASE_DIR, "taxonomy.csv")
-OUTDIR = os.path.join(BASE_DIR, "analysis_output")
+# Import paths from config
+from config import get_paths
+
+paths = get_paths()
+DATA_ROOT = paths["DATA_ROOT"]
+LABELS_PATH = paths["LABELS_PATH"]
+TAXONOMY_PATH = paths["TAXONOMY_PATH"]
+OUTDIR = os.path.join(os.path.dirname(DATA_ROOT), "analysis_output")
+
+print(f"[INFO] Running on: {paths['MACHINE']}")
+print(f"[INFO] DATA_ROOT: {DATA_ROOT}")
 
 
 def get_class_folders(root):

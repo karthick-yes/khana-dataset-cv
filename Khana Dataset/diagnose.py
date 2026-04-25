@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-BRUTAL DIAGNOSTIC — tells you exactly what's happening
-"""
+Diagnostic script to explore the structure and contents of the KHANA dataset.
+This script will:"""
 
 import os
+import sys
 
-BASE = "/home/karthiksunil/work/code/cv/CuisineProject/Khana Dataset"
-KHANA = os.path.join(BASE, "extracted", "khana")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from config import get_paths
+
+paths = get_paths()
+KHANA = paths["DATA_ROOT"]
 
 print("=" * 70)
-print("BRUTAL DIAGNOSTIC")
+print("DIAGNOSTIC")
 print("=" * 70)
 
 # 1. Does the path even exist?
