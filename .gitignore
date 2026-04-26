@@ -3,3 +3,4 @@ khana/
 __pycache__/
 checkpoints/*.pt
 checkpoints/*.pth
+yolov8x.pt
