@@ -1,15 +1,7 @@
 import os
 
+
 def get_paths():
-    pc_path = "/home/karthiksunil/work/code/cv/CuisineProject/Khana Dataset/extracted/khana"
-    if os.path.exists(pc_path):
-        return {
-            "DATA_ROOT": pc_path,
-            "CHECKPOINT_DIR": "/home/karthiksunil/work/code/cv/CuisineProject/checkpoints",
-            "LABELS_PATH": "/home/karthiksunil/work/code/cv/CuisineProject/Khana Dataset/labels.txt",
-            "TAXONOMY_PATH": "/home/karthiksunil/work/code/cv/CuisineProject/Khana Dataset/taxonomy.csv",
-            "MACHINE": "local_pc"
-        }
 
     lab_path = os.path.expanduser("~/data/khana")
     if os.path.exists(lab_path):
@@ -18,7 +10,7 @@ def get_paths():
             "CHECKPOINT_DIR": os.path.expanduser("~/data/checkpoints"),
             "LABELS_PATH": os.path.expanduser("~/data/labels.txt"),
             "TAXONOMY_PATH": os.path.expanduser("~/data/taxonomy.csv"),
-            "MACHINE": "lab_machine"
+            "MACHINE": "lab_machine",
         }
 
     os.makedirs(os.path.expanduser("~/data/checkpoints"), exist_ok=True)
@@ -27,5 +19,5 @@ def get_paths():
         "CHECKPOINT_DIR": os.path.expanduser("~/data/checkpoints"),
         "LABELS_PATH": os.path.expanduser("~/data/labels.txt"),
         "TAXONOMY_PATH": os.path.expanduser("~/data/taxonomy.csv"),
-        "MACHINE": "fallback"
+        "MACHINE": "fallback",
     }
