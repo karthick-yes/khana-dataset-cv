@@ -1,9 +1,0 @@
-torch
-torchvision
-timm
-ultralytics
-opencv-python
-segment-anything
-gdown
-tqdm
-wandb
