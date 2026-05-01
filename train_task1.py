@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 """
-Task 1: Khana Image Classification — BULLETPROOF VERSION
-- Saves checkpoint EVERY epoch
-- Saves best model separately
-- Auto-resumes from latest checkpoint
-- Survives SSH disconnect (run inside tmux)
-- Handles truncated/corrupted images
-- TQDM progress bars
-- Memory fragmentation fix
+Task 1: Khana Image Classification 
 """
 import os
 import sys

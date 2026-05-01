@@ -37,7 +37,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # ============================================================
 paths = get_paths()
 DATA_ROOT = paths["DATA_ROOT"]
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TASK2_IMAGE_DIR = os.path.expanduser("~/data/task2_images")
 OUTPUT_DIR = os.path.expanduser("~/data/task2_output")
@@ -640,6 +640,11 @@ def main():
     parser.add_argument("--single_image", type=str, default=None)
     parser.add_argument("--no_viz", action="store_true")
     args = parser.parse_args()
+
+    # Expand user paths
+    args.single_image = os.path.expanduser(args.single_image) if args.single_image else None
+    args.input_dir = os.path.expanduser(args.input_dir)
+    args.output_dir = os.path.expanduser(args.output_dir)
 
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] Device: {DEVICE}")
