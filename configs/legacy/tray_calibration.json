@@ -1,0 +1,9 @@
+{
+  "image_width": 2296,
+  "image_height": 2514,
+  "rel_x1": 0.00043554006968641115,
+  "rel_y1": 0.18297533810660302,
+  "rel_x2": 0.9703832752613241,
+  "rel_y2": 0.6101829753381066,
+  "description": "Relative coordinates of the tray bounding box (top\u2011left, bottom\u2011right)"
+}

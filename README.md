@@ -1,28 +1,118 @@
-Khana: A Comprehensive Indian Cuisine Dataset
-Description
-Khana is a food classification dataset featuring a wide range of dishes from Indian cuisine. The goal of this dataset is to solve challenges found in existing datasets: lack of representation of Indian food dishes, generalization over limited diversity due to Western-influenced classes, conditions, viewpoints and environments. The dataset contains 131,000+ images comprising 80 food dishes. You can download the dataset, labels from the dataset, and the taxonomy created during its inception here. Khana does not own the copyright of the images. It only compiles an accurate list of web images for each food dish. It is available for researchers and educators who wish to use the images for non-commercial research and/or educational purposes only.
+# YOLO and SAM Detection Commands
 
-Detailed Statistics
-The figure shows the detailed statistics of Khana with distributions of categories and images per food category.
+This document lists commands to run detection using YOLO and SAM for single images and batches, including debug modes.
 
-Dataset and Additional Links
-Research Article: https://arxiv.org/pdf/2509.06006
-Dataset GitHub: https://github.com/prabhuomkar/Khana
-Dataset Link: https://drive.google.com/drive/folders/1PWyJdkizw5ABBd8BIAnr_FZq91YZ2Uo0?usp=sharing
-Dataset Website: https://khana.omkar.xyz/
+---
 
-Problems to be solved – 3 +1 Bonus, 33%+20% (Bonus)
+## YOLO — Single Image
 
-Image Classification – Design and train a classifier to achieve better classification performance (over 80 classes) than baseline. Marks will be awarded based on the leaderboard. Baseline validation accuracy (80% train, 20% validation) is ~91%. Below the baseline validation accuracy will get 0%, and will not be evaluated further. If validation accuracy is above baseline, then we will provide 20-30 test images on which the final test accuracy will be computed. The leader will get 100% of marks, next 95% and so on.
+```bash
+uv run python task2_detect.py \
+  --method yolo \
+  --single_image "~/data/task2_images/Plate 146.jpg" \
+  --output_dir ~/data/task2_yolo_single \
+  --low_vram \
+  --detector_max_side 960
+```
 
-There are clean thali images such as this
+---
 
-You have to run detection algorithm on this such that you can get an output like this
+## YOLO — Single Image (Debug)
 
-However note that the labels are incorrect in this picture – they do not belong to the 80 classes in the Khana dataset. Develop a method such that the detection results give the correct labels and bounding boxes.
+```bash
+uv run python task2_detect.py \
+  --method yolo \
+  --single_image "~/data/task2_images/Plate 146.jpg" \
+  --output_dir ~/data/task2_yolo_debug \
+  --debug \
+  --low_vram \
+  --detector_max_side 960
+```
 
-We will evaluate this using a held out test set – but only with respect to the labels, not the accuracy of the bounding box. Precision Recall will be used as the metric.
+---
 
-Instead of above clean images you will be given natural images like below, with detection (also shown below) suffering because the view is not a clean bird's eye view. Develop a method to get a BEV of these natural images and then run the detection algorithm in 2. Evaluation here will be qualitative – visual inspection.
+## YOLO — Batch
 
-BONUS – use the steps in https://cal-cs180.github.io/fa25/hw/proj4/index.html to create a NRF of your thaali.
+```bash
+uv run python task2_detect.py \
+  --method yolo \
+  --input_dir ~/data/task2_images \
+  --output_dir ~/data/task2_yolo_batch \
+  --low_vram \
+  --detector_max_side 960
+```
+
+---
+
+## SAM — Single Image
+
+```bash
+uv run python task2_detect.py \
+  --method sam \
+  --single_image "~/data/task2_images/Plate 146.jpg" \
+  --output_dir ~/data/task2_sam_single \
+  --sam_checkpoint ~/data/sam_vit_b_01ec64.pth \
+  --sam_points_per_side 16
+```
+
+---
+
+## SAM — Single Image (Debug)
+
+```bash
+uv run python task2_detect.py \
+  --method sam \
+  --single_image "~/data/task2_images/Plate 146.jpg" \
+  --output_dir ~/data/task2_sam_debug \
+  --debug \
+  --sam_checkpoint ~/data/sam_vit_b_01ec64.pth \
+  --sam_points_per_side 16
+```
+
+---
+
+## SAM — Batch (with YOLO fallback)
+
+```bash
+uv run python task2_detect.py \
+  --method sam \
+  --input_dir ~/data/task2_images \
+  --output_dir ~/data/task2_sam_batch \
+  --sam_checkpoint ~/data/sam_vit_b_01ec64.pth \
+  --sam_points_per_side 16
+```
+
+---
+
+## SAM — Strict (no fallback)
+
+```bash
+uv run python task2_detect.py \
+  --method sam \
+  --no_sam_fallback_yolo \
+  --single_image "~/data/task2_images/Plate 146.jpg" \
+  --output_dir ~/data/task2_sam_strict \
+  --sam_checkpoint ~/data/sam_vit_b_01ec64.pth
+```
+
+---
+
+## Debug Output Files
+
+The following debug artifacts may be generated in the specified output directory:
+
+- `*_yolo_raw_boxes.jpg`
+- `*_yolo_filtered_boxes.jpg`
+- `*_sam_raw_segments.jpg`
+- `*_sam_raw_boxes.jpg`
+- `*_sam_filtered_boxes.jpg`
+- `*_classified_pre_nms.jpg`
+- `*_detected.jpg`
+
+---
+
+## Notes
+
+- Use `--low_vram` for systems with limited GPU memory.
+- Adjust `--detector_max_side` (e.g., 640 or lower) if memory issues occur.
+- Legacy/experimental Task 2 scripts are now in `scripts/legacy/task2/`.
