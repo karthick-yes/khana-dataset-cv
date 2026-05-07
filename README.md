@@ -116,3 +116,48 @@ The following debug artifacts may be generated in the specified output directory
 - Use `--low_vram` for systems with limited GPU memory.
 - Adjust `--detector_max_side` (e.g., 640 or lower) if memory issues occur.
 - Legacy/experimental Task 2 scripts are now in `scripts/legacy/task2/`.
+
+## Legacy SAM scripts (low-VRAM defaults enabled)
+
+These scripts now default to low-VRAM behavior automatically.
+You can disable it with `--no_low_vram`.
+
+### `scripts/legacy/task2/task2_sam_grid.py`
+
+```bash
+uv run python scripts/legacy/task2/task2_sam_grid.py \
+  --image "~/data/task2_images/Plate 146.jpg"
+```
+
+Optional controls:
+- `--detector_max_side 960`
+- `--sam_device auto|cuda|cpu`
+- `--points_per_side 12`
+- `--no_low_vram`
+
+### `scripts/legacy/task2/sam_with_grid_filter.py`
+
+```bash
+uv run python scripts/legacy/task2/sam_with_grid_filter.py \
+  --image "~/data/task2_images/Plate 146.jpg" \
+  --mode grid
+```
+
+Optional controls:
+- `--detector_max_side 960`
+- `--sam_device auto|cuda|cpu`
+- `--pts_per_side 12`
+- `--no_low_vram`
+
+### `scripts/legacy/task2/sam_inspector.py`
+
+```bash
+uv run python scripts/legacy/task2/sam_inspector.py \
+  --image "~/data/task2_images/Plate 146.jpg"
+```
+
+Optional controls:
+- `--detector_max_side 960`
+- `--sam_device auto|cuda|cpu`
+- `--pts_per_side 12`
+- `--no_low_vram`

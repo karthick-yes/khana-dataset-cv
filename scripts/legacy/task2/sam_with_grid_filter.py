@@ -30,6 +30,27 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 OUTPUT_DIR = os.path.expanduser("~/data/sam_grid_outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+
+def resolve_sam_device(requested):
+    if requested == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda" and not torch.cuda.is_available():
+        print("[WARN] CUDA requested for SAM but unavailable, using CPU")
+        return "cpu"
+    return requested
+
+
+def resize_for_sam(img_np, max_side):
+    if not max_side:
+        return img_np, 1.0
+    h, w = img_np.shape[:2]
+    if max(h, w) <= max_side:
+        return img_np, 1.0
+    scale = max_side / float(max(h, w))
+    new_w, new_h = int(round(w * scale)), int(round(h * scale))
+    resized = cv2.resize(img_np, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
 # ── Manual calibration boxes (relative, from your previous manual.py) ──
 MANUAL_BOXES_REL = [
     [320/1280, 114/720, 426/1280, 247/720],
@@ -167,19 +188,35 @@ def main():
     parser.add_argument("--outdir", default=OUTPUT_DIR)
     parser.add_argument("--pts_per_side", type=int, default=16)
     parser.add_argument("--conf", type=float, default=0.5)
+    parser.add_argument("--sam_device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--detector_max_side", type=int, default=None)
+    parser.add_argument(
+        "--no_low_vram",
+        action="store_true",
+        help="Disable automatic low-VRAM defaults",
+    )
     args = parser.parse_args()
     
     # Expand user paths
     args.image = os.path.expanduser(args.image)
     args.outdir = os.path.expanduser(args.outdir)
 
+    low_vram = not args.no_low_vram
+    if low_vram and args.detector_max_side is None:
+        args.detector_max_side = 960
+    if low_vram and args.pts_per_side == 16:
+        args.pts_per_side = 12
+
+    sam_device = resolve_sam_device(args.sam_device)
+
     img_pil = Image.open(args.image).convert("RGB")
     img_np = np.array(img_pil)
     h, w = img_np.shape[:2]
+    sam_input, sam_scale = resize_for_sam(img_np, args.detector_max_side)
 
     # Load SAM
-    print("[INFO] Loading SAM...")
-    sam = sam_model_registry[SAM_TYPE](checkpoint=SAM_CHECKPOINT).to(DEVICE)
+    print(f"[INFO] Loading SAM on {sam_device}...")
+    sam = sam_model_registry[SAM_TYPE](checkpoint=SAM_CHECKPOINT).to(sam_device)
     mask_gen = SamAutomaticMaskGenerator(
         sam,
         points_per_side=args.pts_per_side,
@@ -187,16 +224,21 @@ def main():
         stability_score_thresh=0.92,
         min_mask_region_area=500,
     )
+    print(
+        f"[INFO] pts_per_side={args.pts_per_side} detector_max_side={args.detector_max_side} low_vram={low_vram}"
+    )
 
     print("[INFO] Running SAM...")
-    masks = mask_gen.generate(img_np)
+    masks = mask_gen.generate(sam_input)
     print(f"[INFO] Total raw segments: {len(masks)}")
 
     # ── 1) Save raw masks overlay ────────────────────────────
-    overlay_raw = img_np.copy()
+    overlay_raw = sam_input.copy()
     for m in masks:
         color = np.random.randint(0, 255, (3,), dtype=np.uint8)
         overlay_raw[m["segmentation"]] = (overlay_raw[m["segmentation"]] * 0.5 + color * 0.5).astype(np.uint8)
+    if sam_scale != 1.0:
+        overlay_raw = cv2.resize(overlay_raw, (w, h), interpolation=cv2.INTER_NEAREST)
     cv2.imwrite(os.path.join(args.outdir, f"{Path(args.image).stem}_raw.jpg"),
                 cv2.cvtColor(overlay_raw, cv2.COLOR_RGB2BGR))
 
@@ -222,7 +264,7 @@ def main():
                     cv2.cvtColor(grid_vis, cv2.COLOR_RGB2BGR))
 
     # ── 3) Filter masks ─────────────────────────────────────
-    img_area = w * h
+    img_area = sam_input.shape[0] * sam_input.shape[1]
     kept_boxes = []
     rejected = []
 
@@ -230,26 +272,31 @@ def main():
         area = m["area"]
         ratio = area / img_area
         x, y, bw, bh = m["bbox"]
+        x = int(round(x / sam_scale))
+        y = int(round(y / sam_scale))
+        bw = int(round(bw / sam_scale))
+        bh = int(round(bh / sam_scale))
+        scaled_bbox = (x, y, bw, bh)
         aspect = bw / bh if bh > 0 else 0
 
         # Basic area/aspect filter
         if ratio < 0.01 or ratio > 0.35:
-            rejected.append((m["bbox"], "area"))
+            rejected.append((scaled_bbox, "area"))
             continue
         if aspect < 0.15 or aspect > 6.0:
-            rejected.append((m["bbox"], "aspect"))
+            rejected.append((scaled_bbox, "aspect"))
             continue
         if bw < 40 or bh < 40:
-            rejected.append((m["bbox"], "tiny"))
+            rejected.append((scaled_bbox, "tiny"))
             continue
 
         # Grid filter (if not default)
         if grid_boxes is not None:
-            if not mask_in_grid(m["bbox"], grid_boxes, method="center"):
-                rejected.append((m["bbox"], "grid"))
+            if not mask_in_grid(scaled_bbox, grid_boxes, method="center"):
+                rejected.append((scaled_bbox, "grid"))
                 continue
 
-        kept_boxes.append(m["bbox"])
+        kept_boxes.append(scaled_bbox)
 
     # Save filter visualisation
     filter_vis = img_np.copy()
@@ -307,6 +354,8 @@ def main():
 
     print(f"\n[DONE] {len(kept_det)} unique items after NMS.")
     print(f"Outputs saved in {args.outdir}")
+    if low_vram and DEVICE == "cuda":
+        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

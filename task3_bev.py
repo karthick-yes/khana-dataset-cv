@@ -1,258 +1,292 @@
 #!/usr/bin/env python3
 """
-Task 3: Bird's Eye View (BEV) correction for natural-angle thali images.
+Task 3: Bird's Eye View correction using SAM for EVERYTHING.
 
 Pipeline:
-  1. Auto-detect the 4 corners of the thali tray
-       → large quadrilateral contour in the image
-  2. If auto fails (or --manual flag), let the user click 4 corners
-  3. Compute homography → warpPerspective → BEV image
-  4. Run Task 2 detect_thali() on the BEV image
-  5. Save annotated result
+  1. Run SAM on the natural-angle image
+  2. Find the tray mask from SAM outputs (largest roughly-rectangular mask)
+  3. Extract 4 corners from tray mask → compute homography → warpPerspective → BEV
+  4. Run SAM again on the BEV image
+  5. Classify each SAM crop with Task 1 classifier (same as Task 2)
+  6. Save annotated results + debug images at every stage
+
+Why SAM for tray detection:
+  The silver tray on a silver table has nearly zero gradient at the boundary,
+  so Canny/adaptive-threshold approaches fail. SAM is class-agnostic and
+  segments by visual structure — the tray IS one of the 37 masks SAM
+  already produces. We just need to pick the right one.
 
 Usage:
-  # Fully automatic, then detect food:
   python task3_bev.py --image ~/data/task3_samples/thali_natural.jpg
-
-  # Force manual corner selection:
-  python task3_bev.py --image ~/data/task3_samples/thali_natural.jpg --manual
-
-  # BEV only, skip food detection:
-  python task3_bev.py --image ~/data/task3_samples/thali_natural.jpg --no_detect
-
-  # Batch a whole folder:
-  python task3_bev.py --input_dir ~/data/task3_samples/
+  python task3_bev.py --input_dir ~/data/task3_samples/ --output_dir ~/data/task3_out
 """
 
+import argparse
+import json
 import os
 import sys
-import argparse
 from pathlib import Path
 
 import cv2
 import numpy as np
+import timm
+import torch
 from PIL import Image, ImageFile
+from torchvision import transforms
+from ultralytics import YOLO
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-# ── optional: reuse Task 2 detection ──────────────────────────────────────────
-try:
-    import torch
-    import timm
-    from ultralytics import YOLO
-    from torchvision import transforms
-
-    HAS_DETECT = True
-except ImportError:
-    HAS_DETECT = False
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 try:
     from config import get_paths
 
-    _paths = get_paths()
-    DATA_ROOT = _paths["DATA_ROOT"]
-    CHECKPOINT_DIR = _paths["CHECKPOINT_DIR"]
+    paths = get_paths()
+    DATA_ROOT = paths["DATA_ROOT"]
+    CHECKPOINT_PATH = os.path.expanduser("~/data/checkpoints/best_model.pt")
 except Exception:
     DATA_ROOT = os.path.expanduser("~/data/khana")
-    CHECKPOINT_DIR = os.path.expanduser("~/data/checkpoints")
+    CHECKPOINT_PATH = os.path.expanduser("~/data/checkpoints/best_model.pt")
 
-CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "best_model.pt")
+SAM_CHECKPOINT = os.path.expanduser("~/data/sam_vit_b_01ec64.pth")
+SAM_MODEL_TYPE = "vit_b"
 OUTPUT_DIR = os.path.expanduser("~/data/task3_output")
-DEVICE = "cpu"  # safe default; change to "cuda" on lab machine
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — ORDER CORNERS (top-left, top-right, bottom-right, bottom-left)
-# ══════════════════════════════════════════════════════════════════════════════
-def order_points(pts: np.ndarray) -> np.ndarray:
-    """
-    Sort 4 points into [TL, TR, BR, BL] order.
-    Works regardless of how the user clicked or how the contour returned them.
-    """
-    pts = pts.reshape(4, 2).astype("float32")
+# ============================================================
+# SHARED UTILS (same as task2)
+# ============================================================
+def get_class_names(data_root):
+    root = Path(data_root)
+    if not root.exists():
+        print(f"[ERROR] Data root not found: {data_root}")
+        sys.exit(1)
+    return sorted(d.name for d in root.iterdir() if d.is_dir())
+
+
+def square_pad_and_normalize(crop_pil, target_size=224):
+    w, h = crop_pil.size
+    size = max(w, h)
+    padded = Image.new("RGB", (size, size), (114, 114, 114))
+    padded.paste(crop_pil, ((size - w) // 2, (size - h) // 2))
+    resized = padded.resize((target_size, target_size), Image.LANCZOS)
+    return transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    )(resized)
+
+
+def load_classifier(checkpoint_path, num_classes):
+    print("[INFO] Loading classifier...")
+    model = timm.create_model(
+        "convnext_base.fb_in22k_ft_in1k", pretrained=False, num_classes=num_classes
+    )
+    ckpt = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model = model.to(DEVICE).eval()
+    print(f"[INFO] Classifier loaded. Best val acc: {ckpt.get('best_acc', 'N/A')}%")
+    return model
+
+
+def load_sam(checkpoint, points_per_side):
+    if not os.path.exists(checkpoint):
+        print(f"[ERROR] SAM checkpoint not found: {checkpoint}")
+        sys.exit(1)
+    try:
+        from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
+    except ImportError:
+        print("[ERROR] segment_anything not installed.")
+        sys.exit(1)
+    print(f"[INFO] Loading SAM ({SAM_MODEL_TYPE})...")
+    sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=checkpoint).to(DEVICE)
+    generator = SamAutomaticMaskGenerator(
+        sam,
+        points_per_side=points_per_side,
+        pred_iou_thresh=0.88,
+        stability_score_thresh=0.92,
+        min_mask_region_area=300,
+    )
+    print("[INFO] SAM loaded.")
+    return generator
+
+
+@torch.no_grad()
+def classify_crop(model, crop_pil, class_names):
+    tensor = square_pad_and_normalize(crop_pil).unsqueeze(0).to(DEVICE)
+    probs = torch.softmax(model(tensor), dim=1)
+    idx = probs.argmax(dim=1).item()
+    conf = probs.max(dim=1).values.item()
+    top5_idx = probs[0].topk(5).indices.cpu().numpy()
+    top5 = [(class_names[i], float(probs[0][i])) for i in top5_idx]
+    return idx, conf, top5
+
+
+def compute_iou(b1, b2):
+    ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
+    ix2, iy2 = min(b1[2], b2[2]), min(b1[3], b2[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    a1 = (b1[2] - b1[0]) * (b1[3] - b1[1])
+    a2 = (b2[2] - b2[0]) * (b2[3] - b2[1])
+    return inter / (a1 + a2 - inter + 1e-6)
+
+
+def remove_duplicates(detections, iou_threshold=0.4, same_label_iou=0.05):
+    detections = sorted(detections, key=lambda x: x["confidence"], reverse=True)
+    kept = []
+    for det in detections:
+        dup = False
+        for k in kept:
+            iou = compute_iou(det["box"], k["box"])
+            if det["label"] == k["label"] and iou > same_label_iou:
+                dup = True
+                break
+            if det["label"] != k["label"] and iou > iou_threshold:
+                dup = True
+                break
+        if not dup:
+            kept.append(det)
+    return kept
+
+
+def save_debug(output_dir, stem, suffix, img_bgr):
+    path = os.path.join(output_dir, f"{stem}_{suffix}.jpg")
+    cv2.imwrite(path, img_bgr)
+    return path
+
+
+def make_sam_overlay(img_rgb, masks):
+    overlay = img_rgb.copy()
+    rng = np.random.default_rng(42)
+    for m in masks:
+        color = rng.integers(0, 255, size=3, dtype=np.uint8)
+        overlay[m["segmentation"]] = (
+            0.5 * overlay[m["segmentation"]] + 0.5 * color
+        ).astype(np.uint8)
+    return cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
+
+
+# ============================================================
+# STEP 1: FIND TRAY FROM SAM MASKS
+# ============================================================
+def order_points(pts):
+    pts = np.array(pts, dtype="float32").reshape(4, 2)
     rect = np.zeros((4, 2), dtype="float32")
-
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]  # TL — smallest x+y
-    rect[2] = pts[np.argmax(s)]  # BR — largest  x+y
-
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]  # TR — smallest y-x
-    rect[3] = pts[np.argmax(diff)]  # BL — largest  y-x
-
+    rect[0] = pts[np.argmin(s)]  # TL
+    rect[2] = pts[np.argmax(s)]  # BR
+    diff = np.diff(pts, axis=1).flatten()
+    rect[1] = pts[np.argmin(diff)]  # TR
+    rect[3] = pts[np.argmax(diff)]  # BL
     return rect
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 2A — AUTO corner detection
-# ══════════════════════════════════════════════════════════════════════════════
-def auto_detect_corners(img_bgr: np.ndarray) -> np.ndarray | None:
+def find_tray_from_sam_masks(masks, img_shape, debug_bgr=None):
     """
-    Finds the thali tray as the largest quadrilateral-ish contour.
+    Among SAM masks, find the one most likely to be the tray.
 
-    Strategy
-    --------
-    - Convert to grayscale → blur → Canny
-    - Find all contours, keep the largest by area
-    - Approximate to a polygon; if it has 4 sides → done
-    - If it has more sides (rounded tray), fit a min-area rectangle
-    - Returns None if nothing plausible is found
+    Criteria (in order of importance):
+      1. Area: 25-80% of image (tray is large but not the whole image)
+      2. Aspect ratio: 0.5 to 2.5 (thali trays are roughly rectangular/landscape)
+      3. Rectangularity: convex hull area / bounding box area (close to 1 = rectangular)
+      4. Solidity: mask area / convex hull area (tray is a solid region)
 
-    Why this works
-    --------------
-    The tray is the dominant rectangular/elliptical shape in a thali photo.
-    It typically covers >30% of the image area, so it wins the area sort.
-    Rounded trays don't give a clean 4-point contour, so we fall back to
-    the minimum bounding rectangle of the largest contour — that gives us
-    4 tight corners even for circular or slightly curved trays.
+    Returns (corners_4x2, best_mask) or (None, None)
     """
-    h, w = img_bgr.shape[:2]
+    h, w = img_shape[:2]
     img_area = h * w
 
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-
-    # Adaptive thresholding handles shadows well; Canny catches the strong tray edge
-    edges = cv2.Canny(blurred, 30, 120)
-
-    # Dilate to connect broken edges (common where food sits against the tray wall)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    edges = cv2.dilate(edges, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-
-    # Sort by area descending
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-    for cnt in contours[:5]:  # only inspect the 5 largest
-        area = cv2.contourArea(cnt)
-        if area < img_area * 0.15:  # tray must cover at least 15% of image
+    candidates = []
+    for m in masks:
+        area = m["area"]
+        ratio = area / img_area
+        if ratio < 0.20 or ratio > 0.82:
             continue
 
-        # Try to get a tight polygon
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+        seg = m["segmentation"].astype(np.uint8) * 255
+        contours, _ = cv2.findContours(seg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        cnt = max(contours, key=cv2.contourArea)
 
-        if len(approx) == 4:
-            print(f"[AUTO] Found quadrilateral contour (area={area / img_area:.0%})")
-            return order_points(approx.reshape(4, 2))
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        if bw == 0 or bh == 0:
+            continue
+        aspect = bw / bh
+        if aspect < 0.5 or aspect > 2.8:
+            continue
 
-        # Rounded tray — fall back to minimum bounding rectangle
-        if len(approx) > 4:
-            print(
-                f"[AUTO] Rounded tray ({len(approx)} vertices) → using min bounding rect"
-            )
-            rect = cv2.minAreaRect(cnt)
-            box = cv2.boxPoints(rect)  # 4 floating-point corners
-            return order_points(box)
+        hull = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+        bbox_area = float(bw * bh)
+        cnt_area = cv2.contourArea(cnt)
 
-    print("[AUTO] No suitable quadrilateral found")
-    return None
+        if hull_area < 1:
+            continue
 
+        # rectangularity: how close is the convex hull to filling the bounding box
+        rectangularity = hull_area / bbox_area
+        # solidity: how filled is the mask (avoids hollow/frame masks)
+        solidity = cnt_area / hull_area
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 2B — MANUAL corner selection (interactive OpenCV window)
-# ══════════════════════════════════════════════════════════════════════════════
-_clicked_points: list[tuple[int, int]] = []
+        # score: we want high rectangularity, high solidity, reasonable size
+        score = rectangularity * solidity * ratio
+        candidates.append((score, rectangularity, solidity, ratio, cnt, m))
 
+    if not candidates:
+        print("[TRAY] No tray candidate found in SAM masks.")
+        return None, None
 
-def _mouse_callback(event, x, y, flags, param):
-    global _clicked_points
-    if event == cv2.EVENT_LBUTTONDOWN and len(_clicked_points) < 4:
-        _clicked_points.append((x, y))
-        print(f"  Point {len(_clicked_points)}: ({x}, {y})")
+    # Sort by score descending
+    candidates.sort(key=lambda x: x[0], reverse=True)
 
+    print(f"[TRAY] Top 3 candidates:")
+    for i, (score, rect, sol, rat, _, _) in enumerate(candidates[:3]):
+        print(
+            f"  #{i + 1}: score={score:.3f} rect={rect:.3f} solid={sol:.3f} area={rat:.1%}"
+        )
 
-def manual_select_corners(img_bgr: np.ndarray) -> np.ndarray | None:
-    """
-    Opens a window; user clicks 4 corners of the thali tray in any order.
-    Order: TL → TR → BR → BL is suggested but order_points() will fix it.
-    Press 'q' to cancel.
-    """
-    global _clicked_points
-    _clicked_points = []
+    best_cnt = candidates[0][4]
+    best_mask = candidates[0][5]
 
-    display = img_bgr.copy()
-    h, w = display.shape[:2]
-    scale = min(1.0, 1200 / max(h, w))  # fit in 1200px window
-    disp_w = int(w * scale)
-    disp_h = int(h * scale)
-    display = cv2.resize(display, (disp_w, disp_h))
+    # Get 4 corners from the contour
+    peri = cv2.arcLength(best_cnt, True)
+    approx = cv2.approxPolyDP(best_cnt, 0.02 * peri, True)
 
-    cv2.namedWindow("Select 4 corners — TL TR BR BL — then press ENTER")
-    cv2.setMouseCallback(
-        "Select 4 corners — TL TR BR BL — then press ENTER", _mouse_callback
-    )
+    if len(approx) == 4:
+        print(f"[TRAY] Clean quadrilateral found ({len(approx)} vertices)")
+        corners = order_points(approx.reshape(4, 2))
+    elif len(approx) > 4:
+        print(
+            f"[TRAY] Rounded shape ({len(approx)} vertices) → using min bounding rect"
+        )
+        rect = cv2.minAreaRect(best_cnt)
+        box = cv2.boxPoints(rect)
+        corners = order_points(box)
+    else:
+        print(f"[TRAY] Too few vertices ({len(approx)}) → using bounding rect")
+        bx, by, bw, bh = cv2.boundingRect(best_cnt)
+        corners = order_points(
+            [[bx, by], [bx + bw, by], [bx + bw, by + bh], [bx, by + bh]]
+        )
 
-    print("\n[MANUAL] Click the 4 corners of the thali tray.")
-    print("         Suggested order: Top-Left → Top-Right → Bottom-Right → Bottom-Left")
-    print("         Press ENTER when done, 'r' to reset, 'q' to cancel.\n")
-
-    while True:
-        vis = display.copy()
-        for i, (px, py) in enumerate(_clicked_points):
-            cv2.circle(vis, (px, py), 8, (0, 255, 0), -1)
-            cv2.putText(
-                vis,
-                str(i + 1),
-                (px + 10, py - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 0),
-                2,
-            )
-        if len(_clicked_points) == 4:
-            pts = np.array(_clicked_points, dtype="float32")
-            cv2.polylines(
-                vis, [pts.astype(int).reshape(-1, 1, 2)], True, (0, 255, 0), 2
-            )
-        cv2.imshow("Select 4 corners — TL TR BR BL — then press ENTER", vis)
-        key = cv2.waitKey(20) & 0xFF
-        if key == 13 and len(_clicked_points) == 4:  # ENTER
-            break
-        if key == ord("r"):
-            _clicked_points = []
-        if key == ord("q"):
-            cv2.destroyAllWindows()
-            return None
-
-    cv2.destroyAllWindows()
-
-    # Scale points back to original image coords
-    pts = np.array(_clicked_points, dtype="float32") / scale
-    return order_points(pts)
+    return corners, best_mask
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — PERSPECTIVE WARP → BEV
-# ══════════════════════════════════════════════════════════════════════════════
-def warp_to_bev(
-    img_bgr: np.ndarray, corners: np.ndarray, output_size: int = 800
-) -> np.ndarray:
-    """
-    Given the 4 ordered corners of the tray, warp to a square top-down view.
-
-    We compute the actual tray width/height from the corners so the aspect
-    ratio of the destination rectangle is as close to reality as possible,
-    then scale it to fit within output_size × output_size.
-
-    corners: [TL, TR, BR, BL] in image pixel coordinates
-    """
+# ============================================================
+# STEP 2: WARP TO BEV
+# ============================================================
+def warp_to_bev(img_bgr, corners, output_size=900):
     tl, tr, br, bl = corners
-
-    # Width = average of top edge and bottom edge lengths
     w_top = np.linalg.norm(tr - tl)
     w_bot = np.linalg.norm(br - bl)
-    dst_w = int(max(w_top, w_bot))
-
-    # Height = average of left edge and right edge lengths
     h_left = np.linalg.norm(bl - tl)
     h_right = np.linalg.norm(br - tr)
+    dst_w = int(max(w_top, w_bot))
     dst_h = int(max(h_left, h_right))
 
-    # Scale to fit inside output_size while preserving aspect ratio
     scale = min(output_size / dst_w, output_size / dst_h)
     dst_w = int(dst_w * scale)
     dst_h = int(dst_h * scale)
@@ -267,140 +301,186 @@ def warp_to_bev(
         dtype="float32",
     )
 
-    M = cv2.getPerspectiveTransform(corners, dst_pts)
+    M = cv2.getPerspectiveTransform(corners.astype("float32"), dst_pts)
     warped = cv2.warpPerspective(img_bgr, M, (dst_w, dst_h), flags=cv2.INTER_LANCZOS4)
-    return warped
+    return warped, M
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 4 — OPTIONAL TASK 2 DETECTION
-# ══════════════════════════════════════════════════════════════════════════════
-def run_detection_on_bev(
-    bev_bgr: np.ndarray, checkpoint: str, output_dir: str, stem: str
-) -> list[dict]:
-    """
-    Saves the BEV as a temp JPEG and pipes it through detect_thali().
-    Re-uses exactly the same detection code as Task 2.
-    Returns the list of detection dicts.
-    """
-    if not HAS_DETECT:
-        print("[DETECT] torch/timm/ultralytics not available — skipping detection")
-        return []
+# ============================================================
+# STEP 3: DETECT FOOD ON BEV (same logic as task2 SAM pipeline)
+# ============================================================
+def detect_food_on_bev(
+    bev_bgr,
+    sam_generator,
+    classifier,
+    class_names,
+    conf_threshold=0.45,
+    crop_padding=8,
+    min_area_ratio=0.01,
+    max_area_ratio=0.40,
+    min_box_size=40,
+):
+    bev_rgb = cv2.cvtColor(bev_bgr, cv2.COLOR_BGR2RGB)
+    bev_pil = Image.fromarray(bev_rgb)
+    img_w, img_h = bev_pil.size
+    img_area = float(img_w * img_h)
 
-    import json
-    import timm as _timm
-    import torch as _torch
+    print("[DETECT] Running SAM on BEV...")
+    masks = sam_generator.generate(bev_rgb)
+    print(f"[DETECT] SAM produced {len(masks)} masks on BEV")
 
-    # ── lazy import of shared task2 helpers ──────────────────────────────────
-    # We replicate the minimal parts here so task3 works as a standalone file.
-    # If you prefer, replace this block with:
-    #   from task2_detect import detect_thali, visualize_detections
-    # ─────────────────────────────────────────────────────────────────────────
-    from torchvision import transforms as T
+    # filter masks to food-sized regions (same as task2)
+    candidate_boxes = []
+    for m in masks:
+        x, y, w, h = m["bbox"]
+        ratio = m["area"] / img_area
+        if ratio < min_area_ratio or ratio > max_area_ratio:
+            continue
+        if w < min_box_size or h < min_box_size:
+            continue
+        aspect = w / h if h > 0 else 0
+        if aspect < 0.15 or aspect > 6.0:
+            continue
+        candidate_boxes.append([int(x), int(y), int(x + w), int(y + h)])
 
-    def _get_class_names(root):
-        return sorted([d.name for d in Path(root).iterdir() if d.is_dir()])
+    print(f"[DETECT] {len(candidate_boxes)} boxes after area/size filter")
 
-    def _square_pad(crop_pil, size=224):
-        w, h = crop_pil.size
-        s = max(w, h)
-        padded = Image.new("RGB", (s, s), (114, 114, 114))
-        padded.paste(crop_pil, ((s - w) // 2, (s - h) // 2))
-        resized = padded.resize((size, size), Image.LANCZOS)
-        return T.Compose(
-            [T.ToTensor(), T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]
-        )(resized)
-
-    @_torch.no_grad()
-    def _classify(model, crop_pil, names):
-        t = _square_pad(crop_pil).unsqueeze(0).to(DEVICE)
-        probs = _torch.softmax(model(t), dim=1)
-        idx = probs.argmax(dim=1).item()
-        conf = probs.max(dim=1).values.item()
-        top5_idx = probs[0].topk(5).indices.cpu().numpy()
-        top5 = [(names[i], float(probs[0][i])) for i in top5_idx]
-        return idx, conf, top5
+    # merge overlapping boxes
+    from itertools import combinations
 
     def _iou(a, b):
-        ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
-        ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
-        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-        aa = (a[2] - a[0]) * (a[3] - a[1])
-        ab = (b[2] - b[0]) * (b[3] - b[1])
-        return inter / (aa + ab - inter + 1e-6)
+        return compute_iou(a, b)
 
-    # ── load models ───────────────────────────────────────────────────────────
-    if not os.path.exists(DATA_ROOT):
-        print(f"[DETECT] Data root not found: {DATA_ROOT} — skipping detection")
-        return []
-    class_names = _get_class_names(DATA_ROOT)
+    pre_nms = []
+    for box in candidate_boxes:
+        x1, y1, x2, y2 = box
+        x1p = max(0, x1 - crop_padding)
+        y1p = max(0, y1 - crop_padding)
+        x2p = min(img_w, x2 + crop_padding)
+        y2p = min(img_h, y2 + crop_padding)
+        crop = bev_pil.crop((x1p, y1p, x2p, y2p))
 
-    if not os.path.exists(checkpoint):
-        print(f"[DETECT] Checkpoint not found: {checkpoint} — skipping detection")
-        return []
-
-    print("[DETECT] Loading classifier…")
-    clf = _timm.create_model(
-        "convnext_base.fb_in22k_ft_in1k", pretrained=False, num_classes=len(class_names)
-    )
-    ckpt = _torch.load(checkpoint, map_location=DEVICE, weights_only=False)
-    clf.load_state_dict(ckpt["model_state_dict"])
-    clf = clf.to(DEVICE).eval()
-
-    print("[DETECT] Loading YOLOv8x…")
-    yolo = YOLO("yolov8x.pt")
-
-    # ── save BEV to disk so YOLO can read it ─────────────────────────────────
-    tmp_path = os.path.join(output_dir, f"{stem}_bev_tmp.jpg")
-    cv2.imwrite(tmp_path, bev_bgr)
-
-    bev_pil = Image.fromarray(cv2.cvtColor(bev_bgr, cv2.COLOR_BGR2RGB))
-    img_w, img_h = bev_pil.size
-
-    results = yolo(tmp_path, conf=0.10, iou=0.4, verbose=False)
-    boxes_raw = results[0].boxes.xyxy.cpu().numpy()
-
-    CONF_THRESH = 0.50
-    raw = []
-    for box in boxes_raw:
-        x1, y1, x2, y2 = map(int, box)
-        w, h = x2 - x1, y2 - y1
-        if w < 50 or h < 50:
+        idx, conf, top5 = classify_crop(classifier, crop, class_names)
+        if conf < conf_threshold:
             continue
-        if (w * h) / (img_w * img_h) > 0.45:
-            continue
-        crop = bev_pil.crop(
-            (max(0, x1 - 8), max(0, y1 - 8), min(img_w, x2 + 8), min(img_h, y2 + 8))
-        )
-        idx, conf, top5 = _classify(clf, crop, class_names)
-        if conf < CONF_THRESH:
-            continue
-        raw.append(
+        pre_nms.append(
             {
                 "box": [x1, y1, x2, y2],
                 "label": class_names[idx],
+                "label_idx": idx,
                 "confidence": float(conf),
                 "top5": top5,
             }
         )
 
-    # NMS — keep highest-conf prediction per class (same logic as task2)
-    raw.sort(key=lambda d: d["confidence"], reverse=True)
-    kept = []
-    for det in raw:
-        dup = False
-        for k in kept:
-            if det["label"] == k["label"] or _iou(det["box"], k["box"]) > 0.4:
-                dup = True
-                break
-        if not dup:
-            kept.append(det)
+    print(f"[DETECT] {len(pre_nms)} after confidence filter ({conf_threshold})")
+    final = remove_duplicates(pre_nms)
+    print(f"[DETECT] {len(final)} after NMS")
+    for d in final:
+        print(f"  → {d['label']:30s} conf={d['confidence']:.3f}")
 
-    print(f"[DETECT] {len(kept)} items found in BEV:")
-    for d in kept:
-        print(f"  {d['label']:30s}  conf={d['confidence']:.3f}")
+    return final, masks
 
-    # ── annotate BEV image ───────────────────────────────────────────────────
+
+# ============================================================
+# MAIN PIPELINE PER IMAGE
+# ============================================================
+def process_image(
+    image_path,
+    sam_generator,
+    classifier,
+    class_names,
+    output_dir,
+    conf_threshold=0.45,
+    bev_size=900,
+    points_per_side=16,
+    debug=True,
+):
+    stem = Path(image_path).stem
+    print(f"\n{'=' * 60}")
+    print(f"Image: {Path(image_path).name}")
+    print(f"{'=' * 60}")
+
+    img_bgr = cv2.imread(str(image_path))
+    if img_bgr is None:
+        pil = Image.open(image_path).convert("RGB")
+        img_bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    # ── 1. Run SAM on original image ─────────────────────────────────────────
+    print("[STEP 1] Running SAM on original image...")
+    masks = sam_generator.generate(img_rgb)
+    print(f"[STEP 1] {len(masks)} masks generated")
+
+    if debug:
+        overlay = make_sam_overlay(img_rgb, masks)
+        save_debug(output_dir, stem, "step1_sam_overlay", overlay)
+
+    # ── 2. Find tray from masks ───────────────────────────────────────────────
+    print("[STEP 2] Finding tray mask...")
+    corners, tray_mask = find_tray_from_sam_masks(masks, img_bgr.shape)
+
+    if corners is None:
+        print("[ERROR] Could not find tray. Skipping.")
+        return None
+
+    # debug: draw tray corners on original
+    if debug:
+        dbg = img_bgr.copy()
+        pts = corners.astype(int)
+        cv2.polylines(dbg, [pts.reshape(-1, 1, 2)], True, (0, 255, 0), 3)
+        for i, (label, pt) in enumerate(zip(["TL", "TR", "BR", "BL"], pts)):
+            cv2.circle(dbg, tuple(pt), 12, (0, 255, 0), -1)
+            cv2.putText(
+                dbg,
+                label,
+                (pt[0] + 14, pt[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+            )
+        # also highlight the tray mask
+        if tray_mask is not None:
+            tray_color = np.zeros_like(img_bgr)
+            tray_color[tray_mask["segmentation"]] = (0, 180, 0)
+            dbg = cv2.addWeighted(dbg, 0.7, tray_color, 0.3, 0)
+        save_debug(output_dir, stem, "step2_tray_corners", dbg)
+
+    # ── 3. Warp to BEV ───────────────────────────────────────────────────────
+    print("[STEP 3] Warping to BEV...")
+    bev_bgr, homography = warp_to_bev(img_bgr, corners, output_size=bev_size)
+    bev_path = os.path.join(output_dir, f"{stem}_bev.jpg")
+    cv2.imwrite(bev_path, bev_bgr)
+    print(f"[STEP 3] BEV saved: {bev_path}  size={bev_bgr.shape[1]}x{bev_bgr.shape[0]}")
+
+    # side-by-side comparison
+    if debug:
+        oh, ow = img_bgr.shape[:2]
+        bh, bw = bev_bgr.shape[:2]
+        th = max(oh, bh)
+        orig_r = cv2.resize(img_bgr, (int(ow * th / oh), th))
+        bev_r = cv2.resize(bev_bgr, (int(bw * th / bh), th))
+        sbs = np.hstack([orig_r, bev_r])
+        save_debug(output_dir, stem, "step3_comparison", sbs)
+
+    # ── 4. Detect food on BEV ─────────────────────────────────────────────────
+    print("[STEP 4] Detecting food on BEV...")
+    detections, bev_masks = detect_food_on_bev(
+        bev_bgr,
+        sam_generator,
+        classifier,
+        class_names,
+        conf_threshold=conf_threshold,
+    )
+
+    if debug:
+        bev_rgb = cv2.cvtColor(bev_bgr, cv2.COLOR_BGR2RGB)
+        bev_overlay = make_sam_overlay(bev_rgb, bev_masks)
+        save_debug(output_dir, stem, "step4_bev_sam_overlay", bev_overlay)
+
+    # ── 5. Visualise final detections on BEV ─────────────────────────────────
     vis = bev_bgr.copy()
     colors = [
         (0, 255, 0),
@@ -412,7 +492,7 @@ def run_detection_on_bev(
         (128, 255, 0),
         (0, 128, 255),
     ]
-    for i, d in enumerate(kept):
+    for i, d in enumerate(detections):
         x1, y1, x2, y2 = d["box"]
         c = colors[i % len(colors)]
         cv2.rectangle(vis, (x1, y1), (x2, y2), c, 2)
@@ -423,183 +503,98 @@ def run_detection_on_bev(
             vis, txt, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 2
         )
 
-    det_path = os.path.join(output_dir, f"{stem}_bev_detected.jpg")
-    cv2.imwrite(det_path, vis)
-    print(f"[DETECT] Annotated BEV saved: {det_path}")
+    detected_path = os.path.join(output_dir, f"{stem}_detected.jpg")
+    cv2.imwrite(detected_path, vis)
+    print(f"[STEP 5] Final detection saved: {detected_path}")
 
-    # JSON
-    json_path = os.path.join(output_dir, f"{stem}_detections.json")
-    import json
-
-    with open(json_path, "w") as f:
-        json.dump({"image": stem, "num": len(kept), "detections": kept}, f, indent=2)
-
-    os.remove(tmp_path)  # clean up temp file
-    return kept
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN PIPELINE
-# ══════════════════════════════════════════════════════════════════════════════
-def process_image(
-    image_path: str,
-    output_dir: str,
-    manual: bool = False,
-    no_detect: bool = False,
-    checkpoint: str = CHECKPOINT_PATH,
-    bev_size: int = 800,
-) -> dict:
-
-    stem = Path(image_path).stem
-    os.makedirs(output_dir, exist_ok=True)
-
-    print(f"\n{'=' * 60}")
-    print(f"Image : {Path(image_path).name}")
-    print(f"{'=' * 60}")
-
-    img_bgr = cv2.imread(image_path)
-    if img_bgr is None:
-        pil = Image.open(image_path).convert("RGB")
-        img_bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-
-    # ── 1. Find tray corners ─────────────────────────────────────────────────
-    corners = None
-
-    if not manual:
-        corners = auto_detect_corners(img_bgr)
-
-    if corners is None:
-        print("[INFO] Falling back to manual corner selection…")
-        corners = manual_select_corners(img_bgr)
-
-    if corners is None:
-        print("[ERROR] No corners selected — skipping this image")
-        return {}
-
-    print(f"[INFO] Corners (TL TR BR BL):")
-    for label, pt in zip(["TL", "TR", "BR", "BL"], corners):
-        print(f"         {label}: ({pt[0]:.0f}, {pt[1]:.0f})")
-
-    # ── 2. Save debug image with corner overlay ───────────────────────────────
-    dbg = img_bgr.copy()
-    pts_int = corners.astype(int)
-    cv2.polylines(dbg, [pts_int.reshape(-1, 1, 2)], True, (0, 255, 0), 3)
-    for i, (label, pt) in enumerate(zip(["TL", "TR", "BR", "BL"], pts_int)):
-        cv2.circle(dbg, tuple(pt), 12, (0, 255, 0), -1)
-        cv2.putText(
-            dbg,
-            label,
-            (pt[0] + 14, pt[1] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (0, 255, 0),
-            2,
-        )
-    corners_path = os.path.join(output_dir, f"{stem}_corners.jpg")
-    cv2.imwrite(corners_path, dbg)
-    print(f"[INFO] Corner overlay saved: {corners_path}")
-
-    # ── 3. Warp ───────────────────────────────────────────────────────────────
-    bev_bgr = warp_to_bev(img_bgr, corners, output_size=bev_size)
-    bev_path = os.path.join(output_dir, f"{stem}_bev.jpg")
-    cv2.imwrite(bev_path, bev_bgr)
-    print(f"[INFO] BEV saved: {bev_path}")
-
-    # ── 4. Side-by-side comparison ────────────────────────────────────────────
-    orig_h, orig_w = img_bgr.shape[:2]
-    bev_h, bev_w = bev_bgr.shape[:2]
-    target_h = max(orig_h, bev_h)
-    orig_resized = cv2.resize(img_bgr, (int(orig_w * target_h / orig_h), target_h))
-    bev_resized = cv2.resize(bev_bgr, (int(bev_w * target_h / bev_h), target_h))
-    side_by_side = np.hstack([orig_resized, bev_resized])
-    sbs_path = os.path.join(output_dir, f"{stem}_comparison.jpg")
-    cv2.imwrite(sbs_path, side_by_side)
-    print(f"[INFO] Comparison saved: {sbs_path}")
-
-    # ── 5. Detection on BEV ───────────────────────────────────────────────────
-    detections = []
-    if not no_detect:
-        detections = run_detection_on_bev(bev_bgr, checkpoint, output_dir, stem)
-
-    return {
-        "image": Path(image_path).name,
-        "corners": corners.tolist(),
+    # ── 6. Save JSON ──────────────────────────────────────────────────────────
+    payload = {
+        "image": stem,
+        "num_detections": len(detections),
+        "tray_corners": corners.tolist(),
         "bev_path": bev_path,
+        "detected_path": detected_path,
         "detections": detections,
     }
+    json_path = os.path.join(output_dir, f"{stem}_detections.json")
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+    return payload
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
+# ============================================================
+# MAIN
+# ============================================================
 def main():
-    parser = argparse.ArgumentParser(
-        description="Task 3: Perspective correction → BEV → food detection"
-    )
-
-    parser.add_argument("--image", type=str, default=None, help="Single image path")
-    parser.add_argument(
-        "--input_dir", type=str, default=None, help="Folder of images (batch mode)"
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image", type=str, default=None)
+    parser.add_argument("--input_dir", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=OUTPUT_DIR)
     parser.add_argument("--checkpoint", type=str, default=CHECKPOINT_PATH)
-    parser.add_argument(
-        "--bev_size",
-        type=int,
-        default=800,
-        help="Max dimension of output BEV image (default 800)",
-    )
-    parser.add_argument(
-        "--manual",
-        action="store_true",
-        help="Skip auto-detection; click corners interactively",
-    )
-    parser.add_argument(
-        "--no_detect", action="store_true", help="Only do BEV warp, skip food detection"
-    )
+    parser.add_argument("--sam_checkpoint", type=str, default=SAM_CHECKPOINT)
+    parser.add_argument("--sam_points_per_side", type=int, default=16)
+    parser.add_argument("--conf_threshold", type=float, default=0.45)
+    parser.add_argument("--bev_size", type=int, default=900)
+    parser.add_argument("--no_debug", action="store_true")
     args = parser.parse_args()
 
+    args.output_dir = os.path.expanduser(args.output_dir)
+    args.checkpoint = os.path.expanduser(args.checkpoint)
+    args.sam_checkpoint = os.path.expanduser(args.sam_checkpoint)
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.image:
-        image_paths = [args.image]
+        image_paths = [os.path.expanduser(args.image)]
     elif args.input_dir:
-        exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        d = os.path.expanduser(args.input_dir)
         image_paths = sorted(
-            [
-                str(p)
-                for p in Path(args.input_dir).iterdir()
-                if p.suffix.lower() in exts and not p.name.startswith(".")
-            ]
+            str(p)
+            for p in Path(d).iterdir()
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+            and not p.name.startswith(".")
         )
-        if not image_paths:
-            print(f"[ERROR] No images found in {args.input_dir}")
-            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(0)
 
-    print(f"[INFO] Processing {len(image_paths)} image(s)")
-    print(f"[INFO] Output: {args.output_dir}")
+    if not image_paths:
+        print("[ERROR] No images found.")
+        sys.exit(1)
 
-    import json
+    print(f"[INFO] Device: {DEVICE}")
+    print(f"[INFO] Processing {len(image_paths)} image(s)")
+
+    class_names = get_class_names(DATA_ROOT)
+    classifier = load_classifier(args.checkpoint, num_classes=len(class_names))
+    sam_generator = load_sam(args.sam_checkpoint, args.sam_points_per_side)
 
     all_results = []
-    for path in image_paths:
+    for img_path in image_paths:
         result = process_image(
-            path,
-            args.output_dir,
-            manual=args.manual,
-            no_detect=args.no_detect,
-            checkpoint=args.checkpoint,
+            img_path,
+            sam_generator=sam_generator,
+            classifier=classifier,
+            class_names=class_names,
+            output_dir=args.output_dir,
+            conf_threshold=args.conf_threshold,
             bev_size=args.bev_size,
+            debug=(not args.no_debug),
         )
-        all_results.append(result)
+        if result:
+            all_results.append(result)
+
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
 
     summary_path = os.path.join(args.output_dir, "summary.json")
     with open(summary_path, "w") as f:
         json.dump(all_results, f, indent=2)
-    print(f"\n[DONE] Summary: {summary_path}")
+
+    print(f"\n{'=' * 60}")
+    print(f"Done. {len(all_results)} images processed.")
+    print(f"Results in: {args.output_dir}")
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
