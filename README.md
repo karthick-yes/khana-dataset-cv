@@ -1,5 +1,3 @@
-I'll create a GitHub README for your Computer Vision Final Project based on the Khana Indian Cuisine Dataset. Let me first review the uploaded materials to understand the full scope of your project.
-Now I have a comprehensive understanding of the project. Let me create a professional GitHub README for Karthik's project.
 
 ---
 
